@@ -1,5 +1,7 @@
 # SCULLM — Script Creation Utility for LLMs
 
+![SCULLM — Script creation utility for LLM's, inspired by the SCUMM engine](assets/scullm-card.webp)
+
 **Harness discipline before weights.** On one small coding agent, we changed the harness
 first — and wrote down, as executable law, exactly why.
 
