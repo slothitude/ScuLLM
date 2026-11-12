@@ -1,0 +1,48 @@
+# Root agent for the Gemma 4 main-track submission (work order B1 skeleton).
+# Single declared base model rule (HARNESS_README.md section 3.2): every agent in
+# this tree declares the same alias below.
+agent_class: LlmAgent
+name: crow
+model: gemma-4-e2b-it-qat-w4a16-ct
+description: Resolves a repository issue in /workspace with a minimal, verified source patch, delegating read-only code exploration to a wrapped analyzer tool.
+# Adapter directory adapters/crow_lora/ ships at M2 (adapters/ is optional in the
+# layout, section 2.2). Left commented until then: the harness notebook's structural
+# check rejects an adapter key while no adapters/ directory exists.
+# adapter: crow_lora
+instruction: !include prompts/system.md
+# The seven budget-counting tools (section 6) plus the two free lifecycle tools.
+# submit_patch and get_status have count_tool_call=False (section 6.1); submit_patch
+# is required by gotcha 5 and get_status backs the budget-awareness law in the
+# system prompt. Undeclared tools are never advertised (section 5.2), so both must
+# be declared for the protocol to work.
+tools:
+  - run_command
+  - read_file
+  - edit_file
+  - write_file
+  - get_code_neighbors
+  - search_similar_code
+  - get_code_subgraph
+  - get_status
+  - submit_patch
+  # Read-only analyzer wrapped as an AgentTool (AgentToolEntry, section 2.3;
+  # gotcha 4: skip_summarization returns the sub-agent's raw output directly).
+  - agent_tool:
+      config_path: sub_agents/code_analyzer.yaml
+      skip_summarization: true
+# Peer reference per work order B1. NOTE: the analyzer is already wired above as an
+# AgentTool (gotcha 4's starter-kit pattern). This second reference compiles an
+# independent read-only peer, giving the root a transfer path into it; if M2 traces
+# show the root transferring into the read-only peer instead of calling its tool,
+# drop this entry and keep the agent_tool reference.
+sub_agents:
+  - config_path: sub_agents/code_analyzer.yaml
+skills:
+  - skills/repo-navigation
+generate_content_config:
+  # GenerationConstraints, section 2.4. vLLM guidance: omit thinking_level and
+  # configure include_thoughts true + thinking_budget 4096 instead.
+  max_output_tokens: 16384
+  thinking_config:
+    thinking_budget: 4096
+    include_thoughts: true

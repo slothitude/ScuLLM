@@ -1,0 +1,270 @@
+train_crow_gemma.py — GPU DRY-RUN RECORD (work order C2 / smart-training test lane, 2026-11-12)
+================================================================================================
+
+DRY-RUN: FAIL — gemma-QAT checkpoints cannot be trained in transformers 5.15.1
+("QuantizationMethod.GEMMA do not support training"), and in unsloth the same
+checkpoint dequantizes to 16-bit bf16 (~5.0GB) which is ~768MB short of the
+3060's 5.67GB. Zero optimizer steps ran; no adapter written. Every blocker below
+is measured, not assumed. This FAIL answers OQ3: gemma4 ARCH support is VERIFIED
+in both lanes; what breaks is training the QAT quantization + 3060 VRAM.
+
+------------------------------------------------------------------------
+MOBILE-VARIANT DISCLOSURE (read before trusting any number here)
+
+The dry-run base is google/gemma-4-E2B-it-qat-mobile-transformers — a DRY-RUN-ONLY
+stand-in sharing the Gemma 4 architecture. It is NOT the declared competition base
+(gemma-4-E2B-it-qat-w4a16-ct family) and must NEVER be shipped or declared.
+Staged on Lappy at /tmp/evo-bench/dryrun-base/ (flat snapshot, HF transformers
+format): config.json + model.safetensors (2,458,111,846 B) + tokenizer.json +
+chat_template.jinja. Integrity: sha256 of model.safetensors =
+efab429012b97ab986c4d4838a46ff3ad95d618b42ce514771ca40fadc76a9a4 — matches the
+HF LFS oid exactly. config.json: model_type="gemma4", architectures absent
+(resolves to Gemma4ForConditionalGeneration), quantization_config
+quant_method="gemma" (QAT int4/int2/int8 per-module map, vision+audio towers
+present). Disk: root fs was 99% full (5.9G free) — the 2.3GB checkpoint fits but
+leaves ~3.7G; delete with `rm -rf /tmp/evo-bench/dryrun-base` when done.
+
+LANE: Lappy 192.168.0.33, RTX 3060 Laptop 6144 MiB (5.67 GiB usable), venv
+/mnt/seagate/ml/venv (python 3.12.3): unsloth 2026.10.11, torch 2.14.1+cu130,
+transformers 5.15.1 (resolves from /home/aaron/.local/... — user-site shadows the
+venv copy; both report 5.15.1), peft 0.21.2, trl 1.15.0, huggingface_hub 1.33.0
+(+ hf_transfer, installed for the download). Plain aaron, no sudo except the
+sanctioned observe path. Card was EMPTY before (15 MiB) and after (15 MiB);
+walker-duo was never touched; llama-swap untouched; sampler killed by numeric pid.
+
+------------------------------------------------------------------------
+CORPUS
+
+Work order named corpus_b7_swe.jsonl for the 12-row dry corpus. Measured: its
+rows are {"messages":[...]} chat format — 0 of 12 rows match the trainer's
+D-row contract. Real run, exit path before any model load:
+
+  $ python train_crow_gemma.py --corpus /tmp/evo-bench/corpus_dry12_b7.jsonl ...
+  [data] 0 usable rows, 12 rejected (first: [(0, 'not a D row'), (1, 'not a D row'), (2, 'not a D row')])
+  [data] corpus has no usable D rows
+
+The trainer's contracted D-format corpus in the same directory is
+submission/corpus/corpus_d_gemma.jsonl — the dry fit corpus is its first 12 rows
+(all valid: type D, 4 options, letters A/B/C), staged as
+/tmp/evo-bench/corpus_dry12_d.jsonl. If b7_swe is meant to train, it needs a
+joiner pass into D-rows first.
+
+------------------------------------------------------------------------
+RUN MATRIX (every exposed-flag path, real runs on the 3060; peak VRAM sampled by
+nvidia-smi every 2s, 600 samples, max = 5349 MiB)
+
+Common: --base /tmp/evo-bench/dryrun-base --corpus /tmp/evo-bench/corpus_dry12_d.jsonl
+        --out /tmp/evo-bench/adapter_out --state /tmp/evo-bench/train_state_crow_gemma.json
+
+1) defaults (4-bit requested, HOUSE 7-module targets)
+   unsloth 2026.10.11 banner: "Fast Gemma4 patching. Transformers: 5.15.1."
+     "Unsloth: Model already quantized with gemma. Disabling `load_in_4bit` and
+      `load_in_8bit` to avoid quantization config conflict."
+     "Unsloth: QLoRA and full finetuning all not selected. Switching to 16bit LoRA."
+   -> OOM: "CUDA out of memory. Tried to allocate 768.00 MiB. GPU 0 has a total
+      capacity of 5.67 GiB of which 602.00 MiB is free. ... 4.88 GiB is allocated
+      by PyTorch" (the gemma-QAT checkpoint dequantizes to bf16 ~4.9GB on load)
+   -> fallback lane BLOCKED, all 3 loaders, exact line:
+     "ValueError: The model is quantized with GemmaQuantizationConfig but you are
+      passing a BitsAndBytesConfig config."
+   => no fit. (Script's own --no-4bit is the only exit from that conflict.)
+
+2) --no-4bit (dry-run mode): unsloth lane OOM'd the same way -> fallback lane
+   loaded natively via AutoModelForCausalLM ("[load] fallback lane ok") -> peft
+   injection CRASHED with a TRAINER BUG (see bugs):
+     "NoMatchingPeftModuleError: Target modules {'g','v',',','a','_','p','j',...}
+      not found in the base model."   (charsplit of the comma string)
+
+3) --fallback-transformers --no-4bit --target-modules all-linear (fit attempt):
+   loaded ok, but plain peft (unsloth not imported, so its peft patch is absent)
+   cannot wrap the QAT wrapper modules:
+     "[lora] resolved all-linear -> ['down_proj','embedding_projection',
+      'gate_proj','input_proj','input_proj_linear','k_proj','linear','o_proj',
+      'output_proj','per_layer_input_gate','per_layer_model_projection',
+      'per_layer_projection','q_proj','relative_k_proj','up_proj','v_proj']"
+     "ValueError: Target module Gemma4ClippableLinear((linear): QuantizedLinear(
+      in_features=768, out_features=768, bias=False, num_bits=8)) is not supported."
+
+4) --no-4bit --target-modules all-linear (dry-run mode): DRY-RUN PASS —
+   unsloth lane OOM'd again, but the fallback lane + unsloth's import-time peft
+   patch (unsloth_compiled_cache/moe_utils.py patched_get_peft_model) injected
+   LoRA successfully. Real output:
+     [tok] type=GemmaTokenizer eos='<eos>' pad='<pad>'
+     [fmt] 3 encoded samples, 0 dropped
+     === DRY RUN: completion-only masking check ===
+       t1 [template-prefix]: ids=111 masked=108 unmasked_decoded='A<turn|>\n'
+       t2 [template-prefix]: ids=112 masked=109 unmasked_decoded='A<turn|>\n'
+       t3 [template-prefix]: ids=111 masked=108 unmasked_decoded='A<turn|>\n'
+       prompt tail: ...'ANSWER LETTER:<turn|>\n<|turn>model\nA<turn|>\n'
+     [gpu] dry-run: allocated=2.39GB peak=4.88GB free=0.45/5.67GB
+     [lora] trainable=37,920,768 / 2,365,851,416 (1.603%)
+     DRY-RUN PASS: model + LoRA prep + tokenization verified; no fit run.
+   MASKING VERDICT: CORRECT — completion-only via the tokenizer's own Gemma 4
+   template; exactly the letter + turn-end token trains; prompt fully -100.
+
+5) same lane, real fit: --epochs 1 --accum 1 (12 optimizer steps intended;
+   the script has no --max-steps flag; logging_steps=5 hardcoded -> loss would
+   print at steps 5 and 10)
+   unsloth OOM again -> fallback loaded (this time 5.02GB allocated on GPU)
+   -> TRL SFTTrainer unavailable: OOM "Tried to allocate 768.00 MiB ... 5.02 GiB
+      is allocated" -> plain transformers Trainer rescue lane:
+     "ValueError: The model you are trying to fine-tune is quantized with
+      QuantizationMethod.GEMMA but that quantization method do not support
+      training. Please open an issue on GitHub ... to request the support for
+      training support for QuantizationMethod.GEMMA."
+   => [fit] FAILED. train_state_crow_gemma.json:
+      {"status": "failed", "step": 0, "loss": null, "ts": "2026-11-12T12:40:38+00:00"}
+      adapter_out/ is EMPTY — no adapter_config.json, no adapter_model.safetensors.
+
+------------------------------------------------------------------------
+VERDICTS (OQ3)
+
+- gemma4 ARCH SUPPORT: VERIFIED. unsloth 2026.10.11 prints "Fast Gemma4
+  patching" and patches the arch; transformers 5.15.1 registers gemma4 ->
+  Gemma4ForConditionalGeneration (both CAUSAL_LM and IMAGE_TEXT_TO_TEXT maps);
+  GemmaTokenizer + the canonical "<|turn>...<turn|>" template render correctly;
+  LoRA r16 prep succeeds (37,920,768 trainables / 2,365,851,416 = 1.603%).
+- gemma QAT TRAINING SUPPORT: BROKEN BY DESIGN. transformers 5.15.1 hard-refuses
+  training GEMMA-quantized models (exact ValueError above). unsloth sidesteps it
+  by dequantizing to 16-bit — which then needs ~5.0GB + ~768MB headroom.
+- UNSLOTH vs TRL: the load-bearing fallback (TRL/peft, lane 2/3) is the only lane
+  that loads this checkpoint, and it dies at trainer construction (QAT training
+  refusal + OOM). Lane 1 (unsloth) is arch-correct but VRAM-dead on the 3060.
+- PEAK VRAM: 5349 MiB (nvidia-smi sample max, whole session) / torch
+  max_memory_allocated 4.88GB. The 16-bit QAT load alone nearly fills the card.
+- LOSS STEPS: NONE (0 optimizer steps; no loss values exist to record).
+- ADAPTER: NOT WRITTEN (adapter_out empty; state file says failed/step 0).
+
+TRAINER BUGS FOUND (must be fixed before any fit, one-liners, NOT fixed here —
+the work order forbids editing beyond exposed flags):
+  B1. resolve_targets(): `return list(target_arg)` char-splits a comma string
+      ("q_proj,k_proj" -> 17 chars). Needs target_arg.split(","). Until fixed,
+      --target-modules only works as the literal 'all-linear'.
+  B2. all-linear resolution catches non-wrappable QAT wrappers ('linear' suffix
+      -> Gemma4ClippableLinear/QuantizedLinear). resolve_all_linear already
+      filters by isinstance(nn.Linear) but QuantizedLinear SUBCLASSES nn.Linear,
+      and peft matches by suffix name. Needs a wrapper exclusion (or the HOUSE
+      7-name default + B1 fix, which avoids 'linear' and friends entirely).
+
+T4 CLOUD IMPLICATIONS (the config knowledge this dry-run bought):
+- The declared base (gemma-4-E2B-it-qat-w4a16-ct) is ALSO a QAT checkpoint —
+  the GEMMA-training ValueError will hit on the T4 too regardless of VRAM. The
+  training lane needs one of: (a) the unsloth lane on the T4 (16GB fits the
+  ~5.0GB 16-bit load + LoRA prep + optimizer with headroom — unsloth dequantizes
+  and trains fine, this is the recommended T4 lane), or (b) a one-time
+  dequantized/repacked bf16 base for the transformers lanes.
+- With B1+B2 fixed, the exact same commands re-run on the T4: expect unsloth
+  lane to succeed (no OOM at 16GB) and loss logs at steps 5/10.
+- The 3060 CANNOT host this checkpoint for training in any quantization mode:
+  4-bit is refused by the checkpoint's own config, 16-bit doesn't fit. The
+  smart-training verdict: validate gemma fits on the T4 only; keep the 3060 for
+  the Qwen-scale trainers.
+
+Cleanup verified: sampler killed by numeric pid 3459262; no stray processes;
+GPU back to the pre-run baseline 15 MiB / 6144 MiB. Staged artifacts left on
+Lappy /tmp/evo-bench/: dryrun-base/ (sha-verified stand-in, deletable),
+corpus_dry12_d.jsonl, corpus_dry12_b7.jsonl, fit*.log (full run logs),
+vram_samples.txt, train_state_crow_gemma.json, adapter_out/ (empty).
+
+DRY-RUN: FAIL — gemma-QAT base untrainable in transformers (QuantizationMethod.GEMMA
+refuses training) and 16-bit load OOMs the 3060 (~5.0GB + 768MB > 5.67GB);
+arch support itself VERIFIED; masking VERIFIED; zero steps, no adapter.
+
+------------------------------------------------------------------------
+FIXES APPLIED (2026-11-12, code pass on Rog CPU by ScareCrow:Nvidia;
+target: train_crow_gemma.py in this directory)
+
+B1 (comma-split) - FIXED in resolve_targets(). Old code `return
+list(target_arg)` char-split the comma string ("q_proj,k_proj" -> 17
+single-character module names -> lane 3's NoMatchingPeftModuleError in run
+2). Now:
+    return [t.strip() for t in target_arg.split(",") if t.strip()]
+Single-name inputs preserved ("q_proj" -> ["q_proj"]); whitespace and
+trailing commas tolerated. The HOUSE default --target-modules (comma
+string of the 7 projections) now resolves to the 7-name list as intended.
+
+B2 (QAT-wrapper catch) - FIXED in resolve_all_linear()/resolve_targets().
+New _is_quant_wrapper() excludes quantization wrapper Linears by class
+identity over the whole MRO (fragments "quant" / "clippable" -> catches
+QuantizedLinear, which SUBCLASSES nn.Linear, and Gemma4ClippableLinear).
+Excluded wrappers are counted and printed
+("[lora] all-linear: excluded N quantization wrapper module(s) ..."); if
+NOTHING wrappable remains (QAT-direct base), resolve_targets raises
+SystemExit with a clear "unsupported ... needs a dequantized/16-bit base"
+message instead of feeding peft the cryptic "Target module
+Gemma4ClippableLinear(...) is not supported" from run 3.
+
+HONESTY NOTES (things the fix does NOT do):
+- The wrapper exclusion is a class-MRO identity check, not a hard isinstance
+  import: the wrapper classes exist only in transformers 5.15.1 (GPU lane;
+  Rog has 4.51.3), so importing them would crash elsewhere. The MRO check is
+  isinstance-equivalent against those bases for matching purposes.
+- Post-fix, `--target-modules all-linear` on a QAT-direct checkpoint
+  resolves to the NON-wrapper real linears only (or refuses cleanly if
+  none) - it no longer requests the QAT-wrapped projections at all. The
+  declared T4 lane (unsloth + HOUSE 7-name default targets) is unaffected:
+  7 explicit names, no all-linear resolution, patched peft wraps the QAT
+  modules as it did in run 4.
+- The transformers QuantizationMethod.GEMMA training refusal (run 5) is
+  upstream (transformers), untouched by both fixes.
+
+SELF-TEST RECEIPTS (Rog CPU, python 3.13.0, torch 2.11.0+cpu; real
+nn.Linear plus a fake wrapper family mirroring the measured repr
+Gemma4ClippableLinear((linear): QuantizedLinear(...)); the real module
+loaded from its own file path via importlib):
+
+  B1 resolve_targets('q_proj,k_proj') -> ['q_proj', 'k_proj']
+  B1 resolve_targets('q_proj') -> ['q_proj']
+  B1 PASS: comma string splits into exactly the two module names; single
+  name preserved (whitespace / trailing-comma variants also assert green)
+  [lora] all-linear: excluded 1 quantization wrapper module(s) (QAT base;
+  peft cannot wrap them directly)
+  [lora] resolved all-linear -> ['k_proj', 'q_proj']
+  B2 resolve_all_linear(dequantized-style fake model) -> ['k_proj', 'q_proj']
+  B2 PASS: fake Gemma4ClippableLinear/QuantizedLinear excluded; real
+  nn.Linear q_proj + innocent subclass k_proj included
+  [lora] all-linear: excluded 2 quantization wrapper module(s) (QAT base;
+  peft cannot wrap them directly)
+  [lora] resolved all-linear -> []
+  B2-empty SystemExit -> [lora] --target-modules all-linear: no wrappable
+  nn.Linear left after excluding quantization wrappers -> unsupported for
+  this base (needs a dequantized/16-bit base)
+  B2 PASS: QAT-direct wrapper-only path cleanly reports unsupported
+  ALL SELF-TESTS PASS
+
+  py_compile: OK  ($ python -m py_compile train_crow_gemma.py)
+
+ROG CPU RUN (import + arg-parse + corpus-load path only; NO training and
+NO model-weight load attempted - the fit itself stays 3060/T4-only per the
+VRAM record above; temp --out/--state under state/gemma/_fixcheck so
+submission/ and the real train_state file stay untouched):
+
+  $ python train_crow_gemma.py \
+      --corpus submission/corpus/corpus_d_gemma.jsonl --dry-run
+  -> [config] HOUSE recipe: r=16 alpha=16 dropout=0.0
+     targets=q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj ...
+     (comma default; B1 splits it correctly downstream)
+  -> [data] dry-run on first 3 real rows of corpus_d_gemma.jsonl
+     (0 rejects in the first 3)
+  -> [load] unsloth not importable (ModuleNotFoundError: No module named
+     'unsloth') -> TRL/peft fallback lane   (lane fall-through works)
+  -> [load] FAILED: AttributeError: 'list' object has no attribute 'keys'
+     in transformers 4.51.3 _set_model_specific_special_tokens on the
+     gemma4 tokenizer_config (extra_special_tokens list-vs-dict) - an
+     UPSTREAM/LOCAL-VERSION artifact of Rog's 4.51.3, NOT B1/B2, and NOT
+     present on the 5.15.1 GPU lane (run 4 above tokenized the same
+     checkpoint fine). Script exited 2 through its own load-failure path;
+     state file correctly {"status": "failed", "step": 0, "loss": null}.
+  => FIXES HOLD TO THE LOAD STEP: import, arg-parse, corpus parse (3/3 D
+     rows accepted) and lane fall-through all behave on Rog; resolve_targets
+     itself is unit-verified above because the CPU run cannot reach it
+     (the load dies first, upstream).
+
+WHAT REMAINS FOR THE T4 FIT TEST (verdicts above unchanged, now with
+B1+B2 green):
+  - re-run the same commands on the T4 with the declared base; unsloth lane
+    recommended (16GB fits the ~5.0GB 16-bit dequantized load + LoRA prep +
+    optimizer); expect loss logs at steps 5/10 and a written adapter.
+  - the --fallback-transformers lanes still hit the transformers
+    QuantizationMethod.GEMMA training refusal on a QAT base (upstream, by
+    design) - only the unsloth lane or a one-time repacked bf16 base trains.

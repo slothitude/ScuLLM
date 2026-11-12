@@ -1,0 +1,61 @@
+==============================================================================
+STEP 1  CROSS-VALIDATION: predicted vs measured sample adapter [S2 x S3]
+==============================================================================
+  31B layer-0 (sliding): hidden=5376 q_out=8192 (=heads32*head_dim256)
+  predicted params r=4 q+o 1 layer = 108544  -> bf16 bytes = 217088
+  measured   tensor data bytes     = 217088   file=217672  header=576
+  MATCH: True
+  measured safetensors overhead: 584 B = 0.269% of data  (~144 B/header-entry)
+
+==============================================================================
+STEP 2  E2B LINEAR INVENTORY [S1]  (MEASURED config, not estimated)
+==============================================================================
+  layers=35 (sliding=28, full_attention=7)  hidden=1536  heads=8  head_dim=256  global_head_dim=512  kv_heads=1  intermediate=6144
+  sliding layer 0: q_proj:1536->2048  k_proj:1536->256  v_proj:1536->256  o_proj:2048->1536  gate_proj:1536->6144  up_proj:1536->6144  down_proj:6144->1536
+     full layer 4: q_proj:1536->4096  k_proj:1536->512  v_proj:1536->512  o_proj:4096->1536  gate_proj:1536->6144  up_proj:1536->6144  down_proj:6144->1536
+  all-linear tensors/head = 2*7*35 = 490
+  q/v-only  tensors/head = 2*2*35 = 140
+  upper-bound notes: kv-shared layers (num_kv_shared_layers=20) counted as if every layer owns k/v; use_double_wide_mlp=True per-layer-input path assumed to add no LoRA-targeted linears.
+
+==============================================================================
+STEP 3  PER-HEAD BYTES  ranks 8/16/64/128 x {all-linear, q/v-only}
+==============================================================================
+    target  rank   params/head       bf16 B   bf16 MiB   +10% MiB   fp32 MiB
+all-linear     8     9,719,808   19,439,616      18.54      20.39      37.08
+all-linear    16    19,439,616   38,879,232      37.08      40.79      74.16
+all-linear    64    77,758,464  155,516,928     148.31     163.14     296.62
+all-linear   128   155,516,928  311,033,856     296.62     326.29     593.25
+  q/v-only     8     1,634,304    3,268,608       3.12       3.43       6.23
+  q/v-only    16     3,268,608    6,537,216       6.23       6.86      12.47
+  q/v-only    64    13,074,432   26,148,864      24.94      27.43      49.88
+  q/v-only   128    26,148,864   52,297,728      49.88      54.86      99.75
+
+==============================================================================
+STEP 4  HEAD SETS vs 3 GiB CAP = 3,221,225,472 B   (base submission measured 117376 B)
+==============================================================================
+                           set     target  rank     adapters B        +base B    %cap        margin B  max heads fit
+  MIN-3 (router+crow+analyzer) all-linear     8     64,150,734     64,268,110   2.00%   3,156,957,362            150
+  MIN-3 (router+crow+analyzer) all-linear    16    128,301,468    128,418,844   3.99%   3,092,806,628             75
+  MIN-3 (router+crow+analyzer) all-linear    64    513,205,863    513,323,239  15.94%   2,707,902,233             18
+  MIN-3 (router+crow+analyzer) all-linear   128  1,026,411,726  1,026,529,102  31.87%   2,194,696,370              9
+  MIN-3 (router+crow+analyzer)   q/v-only     8     10,786,407     10,903,783   0.34%   3,210,321,689            895
+  MIN-3 (router+crow+analyzer)   q/v-only    16     21,572,814     21,690,190   0.67%   3,199,535,282            447
+  MIN-3 (router+crow+analyzer)   q/v-only    64     86,291,253     86,408,629   2.68%   3,134,816,843            111
+  MIN-3 (router+crow+analyzer)   q/v-only   128    172,582,503    172,699,879   5.36%   3,048,525,593             55
+             FULL-4 (+planner) all-linear     8     85,534,312     85,651,688   2.66%   3,135,573,784            150
+             FULL-4 (+planner) all-linear    16    171,068,624    171,186,000   5.31%   3,050,039,472             75
+             FULL-4 (+planner) all-linear    64    684,274,484    684,391,860  21.25%   2,536,833,612             18
+             FULL-4 (+planner) all-linear   128  1,368,548,968  1,368,666,344  42.49%   1,852,559,128              9
+             FULL-4 (+planner)   q/v-only     8     14,381,876     14,499,252   0.45%   3,206,726,220            895
+             FULL-4 (+planner)   q/v-only    16     28,763,752     28,881,128   0.90%   3,192,344,344            447
+             FULL-4 (+planner)   q/v-only    64    115,055,004    115,172,380   3.58%   3,106,053,092            111
+             FULL-4 (+planner)   q/v-only   128    230,110,004    230,227,380   7.15%   2,990,998,092             55
+
+==============================================================================
+STEP 5  CHOSEN CHECK
+==============================================================================
+  4 heads (router_lora, crow_lora, analyzer_lora, planner_lora) rank 16 all-linear
+  per-head bf16 = 38,879,232 B; with +10% = 42,767,156 B; x4 = 171,068,624 B
+  + base submission 117,376 B -> total 171,186,000 B = 5.31% of cap
+  margin = 3,050,039,472 B (94.69%)  [requirement: >=25%]
+  MARGIN OK: True

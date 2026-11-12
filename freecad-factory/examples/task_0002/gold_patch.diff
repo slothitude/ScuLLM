@@ -1,0 +1,13 @@
+diff --git a/Mod/PartDesign/fcgear/involute.py b/Mod/PartDesign/fcgear/involute.py
+index 20f5d28..6717c8b 100644
+--- a/Mod/PartDesign/fcgear/involute.py
++++ b/Mod/PartDesign/fcgear/involute.py
+@@ -343,7 +343,7 @@ def genInvolutePolar(Rb, R):
+     """return the involute angle as function of radius R.
+     Rb = base circle radius
+     """
+-    return (sqrt(R * R - Rb * Rb) / Rb) - acos(R / Rb)
++    return (sqrt(R * R - Rb * Rb) / Rb) - acos(Rb / R)
+ 
+ 
+ def rotate(pt, rads):
